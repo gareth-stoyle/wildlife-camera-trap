@@ -101,29 +101,9 @@ class CamTrap:
 def get_config() -> dict:
     '''Return configuration variables in dictionary format'''
     config = {}
-    
-    # # get video details
-    # config['fourcc'] = cv2.VideoWriter_fourcc(*'avc1')
-    # config['fps'] = video.get(cv2.CAP_PROP_FPS)
-    # config['total_frames'] = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-    # config['frames_to_skip'] = int(config['fps']*60*15) # skip first x mins
-    # config['frames_for_iteration'] = int(config['total_frames'] - config['frames_to_skip']) # skip last x mins for footage
-    # config['frame_width'] = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
-    # config['frame_height'] = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     # motion detection config
-    config['delta_thresh'] = 10
+    config['delta_thresh'] = 1
     config['min_area'] = 1000
-
-    # # clip saving algo config
-    # config['min_motion_frames'] = 4
-    # config['min_clip_gap'] = config['fps']*30 # no motion enough to end clip and reset things
-    # config['frames_to_shave'] = (config['min_clip_gap'] * 0.75)  # get rid of 75% of those last no motion frames
-
-    # # drawing timestamp on frame
-    # config['font_scale'] = 1  # Increase this value for bigger text
-    # config['font_color'] = (255, 255, 255)  # White color
-    # config['font_thickness'] = 2  # Thickness of the text
-    # config['font'] = cv2.FONT_HERSHEY_SIMPLEX
 
     return config
