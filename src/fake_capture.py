@@ -2,7 +2,7 @@ import cv2
 
 class FakeCamera:
     def __init__(self):
-        self.video_path = "test_images/fox.mp4"
+        self.video_path = "example_images/fox.mp4"
         self.capture = cv2.VideoCapture(self.video_path)
 
         if not self.capture.isOpened():

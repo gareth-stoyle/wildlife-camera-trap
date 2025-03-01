@@ -1,76 +1,138 @@
+from animal_detection import detect_animal
+import asyncio
 import cv2
-# from picamera2 import Picamera2
-from fake_capture import FakeCamera
+from picamera2 import Picamera2
+# from fake_capture import FakeCamera
+from logger import customLogger
+import numpy as np
 import time
 from typing import Optional
+from queue import Queue 
 
+logger = customLogger("CamTrap", "outputs/app.log", debug=False)
+
+DELTA_THRESH = 1
+MIN_AREA = 5000
 
 class CamTrap:
     def __init__(self, path, duration):
         self.path: str = path
         self.duration: int = duration
         self.start_time: Optional[float] = None
-        self.config: dict = get_config()
 
         # To use dummy footage instead of camera capture, move
         # fake_capture.py into src/ and instantiate FakeCamera()
         # instead of Picamera2()
-        # self.camera: Picamera2 = Picamera2()
-        self.camera = FakeCamera()
+        # self.camera = FakeCamera()
+        self.camera: Picamera2 = Picamera2()
         video_config = self.camera.create_video_configuration(main={"size": (640, 480), "format": "RGB888"})
-        self.camera.configure(video_config)
+        still_config = self.camera.create_still_configuration(main={"size": (1920, 1080)})
+        self.camera.set_controls({
+            "NoiseReductionMode": 2,  # Enables denoising
+            "AwbEnable": 1,           # Enables Auto White Balance
+            "AeEnable": 1,            # Enables Auto Exposure
+            "ExposureTime": 20000,    # Adjusts exposure for better brightness
+            "AnalogueGain": 2.0       # Boosts brightness
+        })
+        self.camera.configure(still_config)
 
-    def run(self) -> None:
+        self.frame_queue = asyncio.Queue() 
+        self.capturing = True
+
+    async def capture_frames(self):
+        """Captures frames at 24 FPS and put them in the queue."""
+        self.camera.start()
+        frame_interval = 1 / 24
+        next_frame_time = time.time()
+
+        while self.capturing:
+            now = time.time()
+            if now >= next_frame_time:
+                logger.info("capturing and adding to Queue")
+                frame = self.camera.capture_array()
+                # self.camera.capture_file("test.jpg")
+
+                await self.frame_queue.put(frame)
+
+                next_frame_time += frame_interval
+                if next_frame_time < now:  # Prevent drift
+                    next_frame_time = now + frame_interval
+
+            await asyncio.sleep(0)
+        
+        self.camera.stop()
+        logger.info("Camera capturing stopped.")
+
+    async def process_frames(self):
+        """Processes frames asynchronously."""
         avg = None
         self.start_time = time.time()
         self.camera.start()
         time.sleep(2)
-        frame = self.camera.capture_array()
-        i = 0
-        # loop until we run out of frames
-        while frame is not None:
-            i += 1
-            detected = False
-            # stop recording when duration met, but continue looping until
-            # no frames left.
-            if (time.time() - self.start_time) > self.duration:
-                self.camera.stop()
+        frame_times = Queue(maxsize=10) # counter for estimating FPS
+        count = 0
 
-            # take breaks to prevent overheating of camera & Pi
-            if i % (24*60*10) == 0:
-                self.camera.stop()
-                time.sleep(10)
-                self.camera.start()
-            
-            print(f'Captured frame, type: {type(frame)}, shape: {frame.shape}')
-            avg, cnts = self._detect_motion(frame, self.config['delta_thresh'], avg)
-            
-            # Find the biggest cnt and check if it's big enough to register
-            if cnts:
-                big_cnt = max(cnts, key=cv2.contourArea)
-                detected = cv2.contourArea(big_cnt) > self.config['min_area']
-            else:
-                detected = False
+        while self.capturing or not self.frame_queue.empty():
+            try:
+                frame = await asyncio.wait_for(self.frame_queue.get(), timeout=3.0)
+                logger.warning(self.frame_queue.qsize())
+                
+                start = time.time()
+                count += 1
 
-            if detected:
-                # feed contours or the bigest contour into the model
-                print("\n=======================================\n")
-                print('Motion detected, feeding contours into model')
-                print(f'cnts len: {len(big_cnt)}, cnts shape: {big_cnt.shape}')
-                print('Model output X')
-                print('drawing bounding box on frame')
-                print('writing frame to path')
-                print("\n=======================================\n")
-                # Draw bounding box on the frame.
-                (x, y, w, h) = cv2.boundingRect(big_cnt)
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (168, 98, 27), 3)
-            else:
-                # write frame and continue
-                print('No motion detected, writing frame and continuing')
-            
-            cv2.imwrite(f"{self.path}_{i}.jpg", frame, [])
-            print(f"Saved: {self.path}_{i}.jpg")
-            frame = self.camera.capture_array()
+                avg = await self._process_single_frame(frame, avg, count)
+
+                frame_time = time.time() - start
+                logger.debug(f"full processing for this frame took {frame_time} seconds")
+                frame_times.put(frame_time)
+                if frame_times.qsize() == 10:
+                    frame_times.get()
+                fps = int(1 / (np.mean(frame_times.queue)))
+                logger.info(f"FPS: {fps}")
+            except asyncio.QueueEmpty:
+                await asyncio.sleep(0)  # Yield control if queue is empty
+                logger.warning("Q is empty.")
+            except asyncio.TimeoutError:
+                if self.capturing:
+                    raise
+                logger.info("No more frames left to process, ending.")
+
+    async def run(self) -> None:
+        """Runs both capture and processing tasks concurrently."""
+        capture_task = asyncio.create_task(self.capture_frames())
+        process_task = asyncio.create_task(self.process_frames())
+
+        try:
+            await asyncio.sleep(self.duration)
+            self.capturing = False
+            await asyncio.gather(capture_task, process_task)
+        except asyncio.CancelledError:
+            self.capturing = False
+
+    async def _process_single_frame(self, frame, avg, count):
+        logger.info(f"======== Image: {count} ========")
+        detected = False
+        # Get contours if motion is detected
+        avg, cnts = self._detect_motion(frame, DELTA_THRESH, avg)
+        
+        # Find the biggest cnt and check if it's big enough to register
+        if cnts:
+            big_cnt = max(cnts, key=cv2.contourArea)
+            detected = cv2.contourArea(big_cnt) > MIN_AREA
+
+        if detected:
+            logger.info('Motion detected, feeding biggest contour into model')
+            (x, y, w, h) = cv2.boundingRect(big_cnt)
+            img = self._prep_img_for_inf(frame, x, y, w, h)
+            species, confidence = detect_animal(img)
+            # Draw bounding box on the frame with label
+            cv2.putText(frame, f'{species}, {int(confidence)}%', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36,255,12), 2)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (168, 98, 27), 3)
+        else:
+            await asyncio.sleep(0.02)
+        
+        cv2.imwrite(f"{self.path}_{count}.jpg", frame, [])
+        logger.info(f"Saved: {self.path}_{count}.jpg")
 
     def _detect_motion(self, frame, delta_thresh, avg) -> tuple:
         '''Determines if motion was detected based on config variables'''
@@ -96,14 +158,23 @@ class CamTrap:
             cv2.CHAIN_APPROX_SIMPLE)
                     
         return (avg, cnts)
+    
+    def _prep_img_for_inf(self, frame, x, y, w, h, target_size=300):
+        """Take a bounding box of a given frame and extract a square img
+        of 300x300 for inferencing"""
+        max_side = max(w, h)
 
+        # Center the square around bounding box
+        cx, cy = x + w // 2, y + h // 2
+        x_new = max(cx - max_side // 2, 0)
+        y_new = max(cy - max_side // 2, 0)
 
-def get_config() -> dict:
-    '''Return configuration variables in dictionary format'''
-    config = {}
+        x_new = min(x_new, frame.shape[1] - max_side)
+        y_new = min(y_new, frame.shape[0] - max_side)
 
-    # motion detection config
-    config['delta_thresh'] = 1
-    config['min_area'] = 1000
+        # Extract the square img
+        square_img = frame[y_new:y_new + max_side, x_new:x_new + max_side]
+        square_img = cv2.resize(square_img, (target_size, target_size), interpolation=cv2.INTER_AREA)
 
-    return config
+        return square_img
+    
