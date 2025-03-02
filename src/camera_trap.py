@@ -1,13 +1,14 @@
 from animal_detection import detect_animal
 import asyncio
 import cv2
+import datetime
 from picamera2 import Picamera2
 # from fake_capture import FakeCamera
 from logger import customLogger
 import numpy as np
+from queue import Queue 
 import time
 from typing import Optional
-from queue import Queue 
 
 logger = customLogger("CamTrap", "outputs/app.log", debug=False)
 
@@ -25,15 +26,7 @@ class CamTrap:
         # instead of Picamera2()
         # self.camera = FakeCamera()
         self.camera: Picamera2 = Picamera2()
-        video_config = self.camera.create_video_configuration(main={"size": (640, 480), "format": "RGB888"})
-        still_config = self.camera.create_still_configuration(main={"size": (1920, 1080)})
-        self.camera.set_controls({
-            "NoiseReductionMode": 2,  # Enables denoising
-            "AwbEnable": 1,           # Enables Auto White Balance
-            "AeEnable": 1,            # Enables Auto Exposure
-            "ExposureTime": 20000,    # Adjusts exposure for better brightness
-            "AnalogueGain": 2.0       # Boosts brightness
-        })
+        still_config = self.camera.create_still_configuration(main={"size": (1280, 720)})
         self.camera.configure(still_config)
 
         self.frame_queue = asyncio.Queue() 
@@ -50,13 +43,20 @@ class CamTrap:
             if now >= next_frame_time:
                 logger.info("capturing and adding to Queue")
                 frame = self.camera.capture_array()
-                # self.camera.capture_file("test.jpg")
 
                 await self.frame_queue.put(frame)
+                logger.debug(f"Queue size: {self.frame_queue.qsize()}")
 
                 next_frame_time += frame_interval
-                if next_frame_time < now:  # Prevent drift
+                if next_frame_time < now: # Prevent drift
                     next_frame_time = now + frame_interval
+            
+                # Put the kibosh on capturing for ~10s if our Queue in RAM
+                # gets to about 4gb. This will only happen after ~500
+                # frames of continuous motion detection (unlikely).
+                if self.frame_queue.qsize() > 1100:
+                    logger.warning(f"Pausing capture for 10s to reduce Queue.")
+                    next_frame_time += 10
 
             await asyncio.sleep(0)
         
@@ -75,7 +75,7 @@ class CamTrap:
         while self.capturing or not self.frame_queue.empty():
             try:
                 frame = await asyncio.wait_for(self.frame_queue.get(), timeout=3.0)
-                logger.warning(self.frame_queue.qsize())
+                logger.warning(f"Queue size: {self.frame_queue.qsize()}")
                 
                 start = time.time()
                 count += 1
@@ -91,11 +91,11 @@ class CamTrap:
                 logger.info(f"FPS: {fps}")
             except asyncio.QueueEmpty:
                 await asyncio.sleep(0)  # Yield control if queue is empty
-                logger.warning("Q is empty.")
             except asyncio.TimeoutError:
                 if self.capturing:
                     raise
-                logger.info("No more frames left to process, ending.")
+        
+        logger.info("No more frames left to process, ending.")
 
     async def run(self) -> None:
         """Runs both capture and processing tasks concurrently."""
@@ -113,7 +113,7 @@ class CamTrap:
         logger.info(f"======== Image: {count} ========")
         detected = False
         # Get contours if motion is detected
-        avg, cnts = self._detect_motion(frame, DELTA_THRESH, avg)
+        avg, cnts = await self._detect_motion(frame, DELTA_THRESH, avg)
         
         # Find the biggest cnt and check if it's big enough to register
         if cnts:
@@ -123,18 +123,16 @@ class CamTrap:
         if detected:
             logger.info('Motion detected, feeding biggest contour into model')
             (x, y, w, h) = cv2.boundingRect(big_cnt)
-            img = self._prep_img_for_inf(frame, x, y, w, h)
-            species, confidence = detect_animal(img)
+            img = await self._prep_img_for_inf(frame, x, y, w, h)
+            species, confidence = await detect_animal(img)
             # Draw bounding box on the frame with label
             cv2.putText(frame, f'{species}, {int(confidence)}%', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36,255,12), 2)
             cv2.rectangle(frame, (x, y), (x + w, y + h), (168, 98, 27), 3)
-        else:
-            await asyncio.sleep(0.02)
-        
-        cv2.imwrite(f"{self.path}_{count}.jpg", frame, [])
-        logger.info(f"Saved: {self.path}_{count}.jpg")
 
-    def _detect_motion(self, frame, delta_thresh, avg) -> tuple:
+        cv2.imwrite(f"{self.path}/{datetime.datetime.now().strftime('%Y-%m-%d---%H-%M-%S-%f')}.jpg", frame, [])
+        logger.info(f"Saved: {self.path}/{datetime.datetime.now().strftime('%Y-%m-%d---%H-%M-%S-%f')}.jpg")
+
+    async def _detect_motion(self, frame, delta_thresh, avg) -> tuple:
         '''Determines if motion was detected based on config variables'''
         # convert frame to grayscale, and blur it
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -159,7 +157,7 @@ class CamTrap:
                     
         return (avg, cnts)
     
-    def _prep_img_for_inf(self, frame, x, y, w, h, target_size=300):
+    async def _prep_img_for_inf(self, frame, x, y, w, h, target_size=300):
         """Take a bounding box of a given frame and extract a square img
         of 300x300 for inferencing"""
         max_side = max(w, h)

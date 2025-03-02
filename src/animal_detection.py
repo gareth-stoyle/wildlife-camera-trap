@@ -32,7 +32,7 @@ except:
     MODEL_PATH = "src/model/tf/EfficientNetV2"
     MODEL = tf.keras.models.load_model(MODEL_PATH, compile=False)
 
-def detect_animal_hailo(img):
+async def detect_animal_hailo(img):
     # Preprocess image for inference
     img = np.expand_dims(img, axis=0).astype(np.float32)
 
@@ -49,7 +49,7 @@ def detect_animal_hailo(img):
     species = LABELS['species'][index]
     return species, confidence
 
-def detect_animal_tf(img):
+async def detect_animal_tf(img):
     # Preprocess image for inference
     img = np.expand_dims(img, axis=0).astype(np.float32)
 
