@@ -35,16 +35,18 @@ class CamTrap:
     async def capture_frames(self):
         """Captures frames at 24 FPS and put them in the queue."""
         self.camera.start()
+        capture_count = 0
         frame_interval = 1 / 24
         next_frame_time = time.time()
 
         while self.capturing:
             now = time.time()
             if now >= next_frame_time:
-                logger.info("capturing and adding to Queue")
+                capture_count += 1
+                logger.debug(f"Capturing image #{capture_count} and adding to Queue")
                 frame = self.camera.capture_array()
 
-                await self.frame_queue.put(frame)
+                await self.frame_queue.put((capture_count, frame))
                 logger.debug(f"Queue size: {self.frame_queue.qsize()}")
 
                 next_frame_time += frame_interval
@@ -58,7 +60,11 @@ class CamTrap:
                     logger.warning(f"Pausing capture for 10s to reduce Queue.")
                     next_frame_time += 10
 
-            await asyncio.sleep(0)
+                # Log every 100 frames
+                if capture_count % 100 == 0:
+                    logger.info(f"Captured {capture_count} frames")
+
+            await asyncio.sleep(0.0001)
         
         self.camera.stop()
         logger.info("Camera capturing stopped.")
@@ -70,25 +76,27 @@ class CamTrap:
         self.camera.start()
         time.sleep(2)
         frame_times = Queue(maxsize=10) # counter for estimating FPS
-        count = 0
 
         while self.capturing or not self.frame_queue.empty():
             try:
-                frame = await asyncio.wait_for(self.frame_queue.get(), timeout=3.0)
-                logger.warning(f"Queue size: {self.frame_queue.qsize()}")
-                
+                image_id, frame = await asyncio.wait_for(self.frame_queue.get(), timeout=3.0)
+                logger.debug(f"Queue size: {self.frame_queue.qsize()}")
                 start = time.time()
-                count += 1
 
-                avg = await self._process_single_frame(frame, avg, count)
+                avg = await self._process_single_frame(frame, avg, image_id)
 
                 frame_time = time.time() - start
-                logger.debug(f"full processing for this frame took {frame_time} seconds")
+                logger.debug(f"full processing for frame #{image_id} took {frame_time} seconds")
                 frame_times.put(frame_time)
                 if frame_times.qsize() == 10:
                     frame_times.get()
                 fps = int(1 / (np.mean(frame_times.queue)))
-                logger.info(f"FPS: {fps}")
+                logger.debug(f"FPS: {fps}")
+
+                # Log every 100 frames
+                if image_id % 100 == 0:
+                    logger.info(f"Processed {image_id} frames")
+
             except asyncio.QueueEmpty:
                 await asyncio.sleep(0)  # Yield control if queue is empty
             except asyncio.TimeoutError:
@@ -109,8 +117,7 @@ class CamTrap:
         except asyncio.CancelledError:
             self.capturing = False
 
-    async def _process_single_frame(self, frame, avg, count):
-        logger.info(f"======== Image: {count} ========")
+    async def _process_single_frame(self, frame, avg, image_id):
         detected = False
         # Get contours if motion is detected
         avg, cnts = await self._detect_motion(frame, DELTA_THRESH, avg)
@@ -121,16 +128,21 @@ class CamTrap:
             detected = cv2.contourArea(big_cnt) > MIN_AREA
 
         if detected:
-            logger.info('Motion detected, feeding biggest contour into model')
+            logger.debug('Motion detected, feeding biggest contour into model')
             (x, y, w, h) = cv2.boundingRect(big_cnt)
             img = await self._prep_img_for_inf(frame, x, y, w, h)
             species, confidence = await detect_animal(img)
             # Draw bounding box on the frame with label
-            cv2.putText(frame, f'{species}, {int(confidence)}%', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36,255,12), 2)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (168, 98, 27), 3)
+            cv2.putText(frame, f'{species}, {int(confidence)}%', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (36, 255, 12), 3)
 
-        cv2.imwrite(f"{self.path}/{datetime.datetime.now().strftime('%Y-%m-%d---%H-%M-%S-%f')}.jpg", frame, [])
-        logger.info(f"Saved: {self.path}/{datetime.datetime.now().strftime('%Y-%m-%d---%H-%M-%S-%f')}.jpg")
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d---%H-%M-%S-%f')
+        cv2.imwrite(f"{self.path}/{timestamp}.jpg",
+                    frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        logger.debug(f"Saved #{image_id}: {self.path}/{timestamp}.jpg")
+
+        return avg
 
     async def _detect_motion(self, frame, delta_thresh, avg) -> tuple:
         '''Determines if motion was detected based on config variables'''

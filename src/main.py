@@ -13,7 +13,7 @@ path = os.path.abspath(os.path.join(current_directory, 'outputs/images'))
 # Setup Camera Trap System
 #
 
-camtrap = CamTrap(path, duration=300)
+camtrap = CamTrap(path, duration=71)
 
 #
 # Start session
