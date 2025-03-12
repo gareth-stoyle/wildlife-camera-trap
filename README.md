@@ -5,6 +5,8 @@ This makes use of a model I have compiled for use on the Hailo AI chip, original
 
 ## Example
 Here is an example of the pipeline being run on sample footage (while I find the time to actually deploy the trap somewhere).
+
+
 ![fox detection](fox_footage.gif)
 
 ## Equipment
@@ -14,5 +16,3 @@ Here is an example of the pipeline being run on sample footage (while I find the
 - RPi Battery pack and holder
 - IR LED light (and battery pack)
 - Trap enclosure (such as https://thepihut.com/products/naturebytes-wildlife-camera-case-shell-only)
-
-[Equipment](equipment.jpg)
